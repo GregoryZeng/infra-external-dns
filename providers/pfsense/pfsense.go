@@ -110,7 +110,9 @@ func (pf *PfsenseProvider) batchApply() {
 	ticker := time.NewTicker(15 * time.Second)
 	go func() {
 		for _ = range ticker.C {
+			fmt.Println("batchApply called")
 			pf.applyChanges()
+			fmt.Println("batchApply ends")
 		}
 	}()
 }
@@ -121,14 +123,14 @@ func (pf *PfsenseProvider) GetName() string {
 }
 
 func (pf *PfsenseProvider) HealthCheck() error {
-	fmt.Println("***** HealthCheck() called ******")
-	c, _, err := zk.Connect([]string{"zk"}, time.Second)
-	defer c.Close()
-	if err != nil {
-		fmt.Println("dnsmasq failed!")
-		panic(err)
-	}
-	fmt.Println("***** HealthCheck() ends ******")
+	// fmt.Println("***** HealthCheck() called ******")
+	// c, _, err := zk.Connect([]string{"zk"}, time.Second)
+	// defer c.Close()
+	// if err != nil {
+	// 	fmt.Println("dnsmasq failed!")
+	// 	panic(err)
+	// }
+	// fmt.Println("***** HealthCheck() ends ******")
 
 	return nil
 }
