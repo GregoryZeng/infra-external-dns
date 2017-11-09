@@ -518,5 +518,5 @@ func (pf *PfsenseProvider) applyChanges() {
 	pf.functionCall("filter_configure")
 	pf.functionCall("system_resolvconf_generate")
 	pf.functionCall("system_dhcpleases_configure")
-	time.Sleep(10 * time.Second)
+
 }
