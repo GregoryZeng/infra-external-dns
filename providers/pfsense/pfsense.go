@@ -22,6 +22,7 @@ import (
 )
 
 var mutex = &sync.Mutex{}
+var changed = false
 
 type PfsenseProvider struct {
 	root        string
@@ -113,14 +114,18 @@ func (pf *PfsenseProvider) Init(rootDomainName string) error {
 }
 
 func (pf *PfsenseProvider) batchApply() {
-	ticker := time.NewTicker(15 * time.Second)
+	// ticker := time.NewTicker(15 * time.Second)
 	go func() {
-		for _ = range ticker.C {
-			fmt.Println("batchApply called")
+		for {
 			mutex.Lock()
-			pf.applyChanges()
+			if changed {
+				fmt.Println("batchApply called")
+				changed = false
+				pf.applyChanges()
+				fmt.Println("batchApply ends")
+			}
 			mutex.Unlock()
-			fmt.Println("batchApply ends")
+			time.Sleep(15 * time.Second)
 		}
 	}()
 }
@@ -210,6 +215,7 @@ var localDnsRecs map[string]interface{}
 
 func (pf *PfsenseProvider) postConfig(conf map[string]interface{}) error {
 	mutex.Lock()
+	changed = true
 	client := &http.Client{}
 	configBytes, err := json.Marshal(conf)
 	if err != nil {
