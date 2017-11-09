@@ -111,7 +111,14 @@ func (pf *PfsenseProvider) GetName() string {
 }
 
 func (pf *PfsenseProvider) HealthCheck() error {
-	// fmt.Println("***** HealthCheck() called and ends ******")
+	fmt.Println("***** HealthCheck() called ******")
+	_, _, err := zk.Connect([]string{"zk"}, time.Second)
+	if err != nil {
+		fmt.Println("dnsmasq failed!")
+		panic(err)
+	}
+	fmt.Println("***** HealthCheck() ends ******")
+
 	return nil
 }
 
