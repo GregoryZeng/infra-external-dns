@@ -24,7 +24,6 @@ type PfsenseProvider struct {
 	root        string
 	apiKey      string
 	apiSecret   string
-	dnsTest     []interface{}
 	dbOpenParam string
 }
 
@@ -38,6 +37,7 @@ var WhiteList = []WhitelistEntry{}
 
 func updateWhiteList() {
 	c, _, err := zk.Connect([]string{"zk"}, time.Second)
+	defer c.Close()
 	if err != nil {
 		fmt.Println("zk connect fails")
 		panic(err)
@@ -73,6 +73,7 @@ func readStrFromZK(path string) string {
 	fmt.Println("***** readStrFromZK() called *****")
 
 	c, _, err := zk.Connect([]string{"zk"}, time.Second)
+	defer c.Close()
 	if err != nil {
 		fmt.Println("zk connect fails")
 		panic(err)
@@ -98,11 +99,20 @@ func (pf *PfsenseProvider) Init(rootDomainName string) error {
 	pf.dbOpenParam = readStrFromZK("/external-dns-configuration/MYSQL_OPENPARAM")
 	pf.root = utils.UnFqdn(rootDomainName)
 	updateWhiteList()
-	pf.getConfig()
-	localDnsRecs, _ = pf.getConfig()
+
+	pf.batchApply()
 
 	fmt.Println("***** Init() ends ******")
 	return nil
+}
+
+func (pf *PfsenseProvider) batchApply() {
+	ticker := time.NewTicker(15 * time.Second)
+	go func() {
+		for _ = range ticker.C {
+			pf.applyChanges()
+		}
+	}()
 }
 
 func (pf *PfsenseProvider) GetName() string {
@@ -112,7 +122,8 @@ func (pf *PfsenseProvider) GetName() string {
 
 func (pf *PfsenseProvider) HealthCheck() error {
 	fmt.Println("***** HealthCheck() called ******")
-	_, _, err := zk.Connect([]string{"zk"}, time.Second)
+	c, _, err := zk.Connect([]string{"zk"}, time.Second)
+	defer c.Close()
 	if err != nil {
 		fmt.Println("dnsmasq failed!")
 		panic(err)
@@ -259,7 +270,7 @@ func (pf *PfsenseProvider) AddRecord(record utils.DnsRecord) error {
 
 		fmt.Println("Current hostList:", hostList)
 		pf.postConfig(conf)
-		pf.applyChanges()
+		// pf.applyChanges()
 
 	} else if record.Type == "TXT" {
 
@@ -352,7 +363,7 @@ func (pf *PfsenseProvider) RemoveRecord(record utils.DnsRecord) error {
 
 	fmt.Println("hostlist after:", hostList)
 	pf.postConfig(conf)
-	pf.applyChanges()
+	// pf.applyChanges()
 	fmt.Println("*****RemoveRecord() ends******")
 
 	return nil
