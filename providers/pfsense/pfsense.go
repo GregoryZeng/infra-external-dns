@@ -97,7 +97,7 @@ func (pf *PfsenseProvider) Init(rootDomainName string) error {
 	pf.apiKey = readStrFromZK("/external-dns-configuration/PFSENSE_APIKEY")
 	pf.dbOpenParam = readStrFromZK("/external-dns-configuration/MYSQL_OPENPARAM")
 	pf.root = utils.UnFqdn(rootDomainName)
-
+	updateWhiteList()
 	pf.getConfig()
 	localDnsRecs, _ = pf.getConfig()
 
@@ -211,7 +211,7 @@ func (pf *PfsenseProvider) AddRecord(record utils.DnsRecord) error {
 
 	fmt.Println("***** AddRecord() called *****")
 	fmt.Println("utils.dnsRecord:", record)
-	updateWhiteList()
+	// updateWhiteList()
 	if record.Type == "A" {
 		// Temporarily ignore non-A records, and only allow records appeared in whitelist to be registered in the pfsense
 		var toHost string
@@ -300,7 +300,7 @@ func (pf *PfsenseProvider) UpdateRecord(record utils.DnsRecord) error {
 
 func (pf *PfsenseProvider) RemoveRecord(record utils.DnsRecord) error {
 	fmt.Println("***** RemoveRecord() called *****")
-	updateWhiteList()
+	// updateWhiteList()
 	fmt.Println("utils.dnsRecord:", record)
 
 	if record.Type != "A" {
@@ -320,6 +320,7 @@ func (pf *PfsenseProvider) RemoveRecord(record utils.DnsRecord) error {
 		}
 	}
 	if !found {
+		fmt.Println("***** record to remove is not found. *****")
 		return nil
 	}
 
@@ -327,7 +328,10 @@ func (pf *PfsenseProvider) RemoveRecord(record utils.DnsRecord) error {
 	var updatedList []interface{}
 	fmt.Println("hostlist before:", hostList)
 
+	fmt.Println("toHost:", toHost, "toDomain:", toDomain)
 	for _, confRecord := range hostList {
+		fmt.Println("conf[host]:", confRecord.(map[string]interface{})["host"].(string))
+		fmt.Println("conf[domain]:", confRecord.(map[string]interface{})["domain"].(string))
 		if confRecord.(map[string]interface{})["host"].(string) == toHost &&
 			confRecord.(map[string]interface{})["domain"].(string) == toDomain {
 			continue
@@ -478,4 +482,5 @@ func (pf *PfsenseProvider) applyChanges() {
 	pf.functionCall("filter_configure")
 	pf.functionCall("system_resolvconf_generate")
 	pf.functionCall("system_dhcpleases_configure")
+	time.Sleep(10 * time.Second)
 }
