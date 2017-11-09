@@ -12,6 +12,7 @@ import (
 	"io/ioutil"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	_ "github.com/go-sql-driver/mysql" // for MySQL lib importing
@@ -19,6 +20,8 @@ import (
 	"github.com/rancher/external-dns/utils"
 	"github.com/samuel/go-zookeeper/zk"
 )
+
+var mutex = &sync.Mutex{}
 
 type PfsenseProvider struct {
 	root        string
@@ -36,7 +39,8 @@ type WhitelistEntry struct {
 var WhiteList = []WhitelistEntry{}
 
 func updateWhiteList() {
-	c, _, err := zk.Connect([]string{"zk"}, time.Second)
+	mutex.Lock()
+	c, _, err := zk.Connect([]string{"zk"}, 10*time.Second)
 	defer c.Close()
 	if err != nil {
 		fmt.Println("zk connect fails")
@@ -58,6 +62,7 @@ func updateWhiteList() {
 			domain: full[ind+1:],
 		})
 	}
+	mutex.Unlock()
 	fmt.Println("Current WhiteList:", WhiteList)
 
 }
@@ -71,14 +76,15 @@ func init() {
 
 func readStrFromZK(path string) string {
 	fmt.Println("***** readStrFromZK() called *****")
-
-	c, _, err := zk.Connect([]string{"zk"}, time.Second)
+	mutex.Lock()
+	c, _, err := zk.Connect([]string{"zk"}, 10*time.Second)
 	defer c.Close()
 	if err != nil {
 		fmt.Println("zk connect fails")
 		panic(err)
 	}
 	recv, _, err := c.Get(path)
+	mutex.Unlock()
 	if err != nil {
 		fmt.Println("children fetch fails")
 		panic(err)
@@ -111,7 +117,9 @@ func (pf *PfsenseProvider) batchApply() {
 	go func() {
 		for _ = range ticker.C {
 			fmt.Println("batchApply called")
+			mutex.Lock()
 			pf.applyChanges()
+			mutex.Unlock()
 			fmt.Println("batchApply ends")
 		}
 	}()
@@ -169,6 +177,7 @@ func (pf *PfsenseProvider) generateAuth() string {
 func (pf *PfsenseProvider) getConfig() (map[string]interface{}, error) {
 
 	authVal := pf.generateAuth()
+	mutex.Lock()
 	client := &http.Client{}
 	req, err := http.NewRequest("GET", "http://pfsense/fauxapi/v1/?action=config_get&__debug=True", nil)
 	req.Header.Add("fauxapi-auth", authVal)
@@ -185,6 +194,7 @@ func (pf *PfsenseProvider) getConfig() (map[string]interface{}, error) {
 		panic("resp errs")
 
 	}
+	mutex.Unlock()
 	var configDat map[string]interface{}
 
 	if err = json.Unmarshal(config, &configDat); err != nil {
@@ -199,6 +209,7 @@ func (pf *PfsenseProvider) getConfig() (map[string]interface{}, error) {
 var localDnsRecs map[string]interface{}
 
 func (pf *PfsenseProvider) postConfig(conf map[string]interface{}) error {
+	mutex.Lock()
 	client := &http.Client{}
 	configBytes, err := json.Marshal(conf)
 	if err != nil {
@@ -222,7 +233,7 @@ func (pf *PfsenseProvider) postConfig(conf map[string]interface{}) error {
 		fmt.Println("client GET fails")
 		panic(err)
 	}
-
+	mutex.Unlock()
 	defer resp.Body.Close()
 	return nil
 }
@@ -277,7 +288,7 @@ func (pf *PfsenseProvider) AddRecord(record utils.DnsRecord) error {
 	} else if record.Type == "TXT" {
 
 		// we now store the TXT record in DB
-
+		mutex.Lock()
 		db, err := sql.Open("mysql", pf.dbOpenParam)
 		if err != nil {
 			fmt.Println("db open errs")
@@ -300,7 +311,7 @@ func (pf *PfsenseProvider) AddRecord(record utils.DnsRecord) error {
 		var jsonInBytes, _ = json.Marshal(recordInJson)
 		db.Exec("delete from TxtRec")
 		db.Exec("insert into TxtRec (Txt) value (?)", string(jsonInBytes))
-
+		mutex.Unlock()
 	}
 	fmt.Println("*****AddRecord() ends *****")
 	return nil
@@ -405,6 +416,7 @@ func (pf *PfsenseProvider) GetRecords() ([]utils.DnsRecord, error) {
 	}
 
 	// Now, fetch TXT record from MySQL
+	mutex.Lock()
 	db, err := sql.Open("mysql", pf.dbOpenParam)
 	if err != nil {
 		fmt.Println("db open errs")
@@ -431,6 +443,7 @@ func (pf *PfsenseProvider) GetRecords() ([]utils.DnsRecord, error) {
 		count++
 	}
 	defer Txt.Close()
+	mutex.Unlock()
 
 	fmt.Println("count:", count)
 
@@ -464,6 +477,9 @@ func (pf *PfsenseProvider) GetRecords() ([]utils.DnsRecord, error) {
 }
 
 func (pf *PfsenseProvider) functionCall(f string) {
+
+	// mutex should not be put here
+
 	client := &http.Client{}
 
 	conf := map[string]interface{}{
