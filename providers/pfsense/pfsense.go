@@ -111,7 +111,7 @@ func (pf *PfsenseProvider) GetName() string {
 }
 
 func (pf *PfsenseProvider) HealthCheck() error {
-	fmt.Println("***** HealthCheck() called and ends ******")
+	// fmt.Println("***** HealthCheck() called and ends ******")
 	return nil
 }
 
