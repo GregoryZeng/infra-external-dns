@@ -227,14 +227,14 @@ var localTxtRecVarLock = sync.Mutex{}
 //  which is responsible for updating local information
 func (pf *PfsenseProvider) batchUpdate() {
 	go func() {
-		shouldUpdateVarLock.Lock()
+		shouldApplyVarLock.Lock()
 
 		// TODO: check if changes have been made from the main goroutine,
 		//       thus avoiding unnecessary connections
 
-		if ShouldUpdate {
-			shouldUpdate = false
-			shouldUpdateVarLock.Unlock()
+		if shouldApply {
+			shouldApply = false
+			shouldApplyVarLock.Unlock()
 
 			// perform getConfig, deltaChange (including additions
 			//  and deletions), postConfig, applyConfig, updateMySQL.
