@@ -26,55 +26,35 @@ var actionmutex = &sync.Mutex{}
 var changed = false
 
 type PfsenseProvider struct {
-	root        string
 	apiKey      string
 	apiSecret   string
 	dbOpenParam string
 }
 
-type WhitelistEntry struct {
-	Fqdn   string
-	host   string
-	domain string
-}
-
-var WhiteList = []WhitelistEntry{}
-
-func updateWhiteList() {
-	c, _, err := zk.Connect([]string{"zk"}, 10*time.Second)
-	defer c.Close()
-	if err != nil {
-		fmt.Println("zk connect fails")
-		panic(err)
-	}
-	children, _, _, err := c.ChildrenW("/external-dns-whitelist")
-	if err != nil {
-		fmt.Println("children fetch fails")
-		panic(err)
-	}
-	WhiteList = []WhitelistEntry{}
-	for _, key := range children {
-		recv, _, _ := c.Get("/external-dns-whitelist/" + key)
-		full := string(recv)
-		ind := strings.IndexRune(full, '.')
-		WhiteList = append(WhiteList, WhitelistEntry{
-			Fqdn:   key,
-			host:   full[:ind],
-			domain: full[ind+1:],
-		})
-	}
-	fmt.Println("Current WhiteList:", WhiteList)
-
-}
-
-// TxtRec : A TXT record designed for bookkeeping all store records in DNS server is now implemented to be stored locally
-var TxtRec = utils.DnsRecord{}
-
 func init() {
 	providers.RegisterProvider("pfsense", &PfsenseProvider{})
 }
 
-func readStrFromZK(path string) string {
+func (pf *PfsenseProvider) Init(rootDomainName string) error {
+
+	fmt.Println("***** Init() called *****")
+	fmt.Printf("rootDomainNames: %s \n", rootDomainName)
+
+	pf.apiSecret = pf.readStrFromZK("/external-dns-configuration/PFSENSE_APISECRET")
+	pf.apiKey = pf.readStrFromZK("/external-dns-configuration/PFSENSE_APIKEY")
+	pf.dbOpenParam = pf.readStrFromZK("/external-dns-configuration/MYSQL_OPENPARAM")
+
+	pf.getWhiteList()
+	pf.initLocalARecord()
+	pf.initLocalTxt()
+
+	pf.batchUpdate()
+
+	fmt.Println("***** Init() ends ******")
+	return nil
+}
+
+func (pf *PfsenseProvider) readStrFromZK(path string) string {
 	fmt.Println("***** readStrFromZK() called *****")
 	c, _, err := zk.Connect([]string{"zk"}, 10*time.Second)
 	defer c.Close()
@@ -93,51 +73,387 @@ func readStrFromZK(path string) string {
 	return string(recv)
 }
 
-func (pf *PfsenseProvider) Init(rootDomainName string) error {
-
-	fmt.Println("***** Init() called *****")
-	fmt.Printf("rootDomainNames: %s \n", rootDomainName)
-
-	pf.apiSecret = readStrFromZK("/external-dns-configuration/PFSENSE_APISECRET")
-	pf.apiKey = readStrFromZK("/external-dns-configuration/PFSENSE_APIKEY")
-	pf.dbOpenParam = readStrFromZK("/external-dns-configuration/MYSQL_OPENPARAM")
-	pf.root = utils.UnFqdn(rootDomainName)
-	updateWhiteList()
-
-	pf.batchApply()
-
-	fmt.Println("***** Init() ends ******")
-	return nil
+func (pf *PfsenseProvider) getWhiteList() {
+	c, _, err := zk.Connect([]string{"zk"}, 10*time.Second)
+	defer c.Close()
+	if err != nil {
+		fmt.Println("zk connect fails")
+		panic(err)
+	}
+	children, _, _, err := c.ChildrenW("/external-dns-whitelist")
+	if err != nil {
+		fmt.Println("children fetch fails")
+		panic(err)
+	}
+	whiteList = []whitelistEntry{}
+	for _, key := range children {
+		recv, _, _ := c.Get("/external-dns-whitelist/" + key)
+		full := string(recv)
+		ind := strings.IndexRune(full, '.')
+		whiteList = append(whiteList, whitelistEntry{
+			Fqdn:   key,
+			host:   full[:ind],
+			domain: full[ind+1:],
+		})
+	}
+	fmt.Println("Current whiteList:", whiteList)
 }
 
-func (pf *PfsenseProvider) batchApply() {
-	go func() {
-		for {
-			varmutex.Lock()
-			tmp := changed
-			varmutex.Unlock()
-			if tmp {
-				actionmutex.Lock()
-				fmt.Println("applyChanges called")
-				changed = false
-				pf.applyChanges()
-				fmt.Println("applyChanges ends")
-				time.Sleep(5 * time.Second)
-				actionmutex.Unlock()
+type whitelistEntry struct {
+	Fqdn   string
+	host   string
+	domain string
+}
+
+var whiteList = []whitelistEntry{}
+
+func (pf *PfsenseProvider) initLocalARecord() {
+	conf := pf.getConfig()
+	dnsrecs := conf["dnsmasq"].(map[string]interface{})["hosts"].([]interface{})
+	for _, dnsrec := range dnsrecs {
+		curDnsRec := dnsrec.(map[string]interface{})
+
+		// Try to match DNS records returned from pfSense to entries
+		//  in the whitelist and then perform a "translation" from the
+		//  <host,domain> record to the corresponding service FQDN
+		var serviceFqdn string
+		var found = false
+		for _, whiteEnt := range whiteList {
+			// A "match" is made on the "host" field
+			//  and the "domain" field
+			if whiteEnt.host == curDnsRec["host"].(string) &&
+				whiteEnt.domain == curDnsRec["domain"].(string) {
+				serviceFqdn = whiteEnt.Fqdn
+				found = true
+				break
 			}
+		}
+
+		if found {
+			localDnsARecord = append(localDnsARecord, utils.DnsRecord{
+				Fqdn:    serviceFqdn,
+				Records: []string{curDnsRec["ip"].(string)},
+				Type:    "A",
+				TTL:     150,
+			})
+		}
+
+	}
+}
+
+func (pf *PfsenseProvider) initLocalTxt() {
+
+	exist, TxtInString := pf.getTxtFromMySQL()
+
+	if exist {
+		fmt.Println("initLocalTxt: previous rec found")
+		var TxtJson map[string]interface{}
+		err := json.Unmarshal([]byte(TxtInString), &TxtJson)
+		if err != nil {
+			fmt.Println("unmarshal errs")
+			panic(err)
+		}
+
+		// initialize local txt record
+		Ips := TxtJson["Records"].([]interface{})
+		var Records []string
+		for _, ip := range Ips {
+			Records = append(Records, ip.(string))
+		}
+
+		localDnsARecordVarLock.Lock()
+		pLocalTxtRec = new(utils.DnsRecord)
+		*pLocalTxtRec = utils.DnsRecord{
+			Fqdn:    TxtJson["Fqdn"].(string),
+			Records: Records,
+			Type:    "TXT",
+			TTL:     140,
+		}
+		localDnsARecordVarLock.Unlock()
+
+	} else {
+		fmt.Println("initLocalTxt: no recs")
+	}
+
+}
+
+func (pf *PfsenseProvider) getTxtFromMySQL() (bool, string) {
+	db, err := sql.Open("mysql", pf.dbOpenParam)
+	if err != nil {
+		fmt.Println("db open errs")
+		panic(err)
+	}
+	defer db.Close()
+
+	err = db.Ping()
+	if err != nil {
+		fmt.Println("db ping err")
+		panic(err)
+	}
+
+	Txt, err := db.Query("select Txt from TxtRec limit 1")
+	if err != nil {
+		fmt.Println("db query errs:", err)
+		panic(err)
+	}
+	var TxtInString string
+
+	exist := false
+	count := 0
+	for Txt.Next() {
+		Txt.Scan(&TxtInString)
+		exist = true
+		count++
+	}
+	defer Txt.Close()
+
+	if count > 1 {
+		panic(fmt.Sprint("getTxtFromMySQL: should not have so many txt recs,", count))
+	}
+
+	return exist, TxtInString
+
+}
+
+var localDnsARecord []utils.DnsRecord
+var localDnsARecordVarLock = sync.Mutex{}
+
+// Note that txtRec is a pointer to a struct
+//  it is nill if no prior records are found in MySQL
+var pLocalTxtRec *utils.DnsRecord
+var localTxtRecVarLock = sync.Mutex{}
+
+// Note that batchUpdate() will create another goroutine,
+//  which is responsible for updating local information
+func (pf *PfsenseProvider) batchUpdate() {
+	go func() {
+		shouldUpdateVarLock.Lock()
+
+		// TODO: check if changes have been made from the main goroutine,
+		//       thus avoiding unnecessary connections
+
+		if ShouldUpdate {
+			shouldUpdate = false
+			shouldUpdateVarLock.Unlock()
+
+			// perform getConfig, deltaChange (including additions
+			//  and deletions), postConfig, applyConfig, updateMySQL.
+			//  then sleep 5 secs waiting for the dnsmasq to restart
+
+			// STEP 1. GET the latest config.xml from pfSense in JSON format
+			conf := pf.getConfig()
+			confDnsmasq := conf["dnsmasq"].(map[string]interface{})
+			confDnsmasqHosts := confDnsmasq["hosts"].([]interface{})
+			var hostlist []jsonDnsmasqHostEntry
+			for _, dnsmasqEnt := range confDnsmasqHosts {
+				curEnt := dnsmasqEnt.(map[string]interface{})
+				hostlist = append(hostlist, jsonDnsmasqHostEntry{
+					aliases: "",
+					descr:   "a Rancher/external-dns autogenerated record",
+					domain:  curEnt["domain"].(string),
+					host:    curEnt["host"].(string),
+					ip:      curEnt["ip"].(string),
+				})
+			}
+
+			// STEP 2. perform deletions of DNS records (with translation according to the whitelist)
+			var newHostlist []jsonDnsmasqHostEntry
+
+			for _, jRec := range hostlist {
+
+				// perform translation
+				foundInWhiteList, Urec := transAJrecToUrec(jRec)
+
+				if !foundInWhiteList {
+					panic(fmt.Sprint("deletion:", jRec, " should have be in whitelist"))
+				}
+
+				// perform possible deletion
+				shouldRemove := false
+				recordsToRemoveVarLock.Lock()
+				for _, remRec := range recordsToRemove {
+					if remRec.Fqdn == Urec.Fqdn {
+						shouldRemove = true
+						break
+					}
+				}
+				recordsToRemoveVarLock.Unlock()
+
+				if shouldRemove {
+					// just leave it
+				} else {
+					newHostlist = append(newHostlist, jRec)
+				}
+
+			}
+
+			hostlist = newHostlist
+			newHostlist = []jsonDnsmasqHostEntry{}
+
+			// STEP 3. perform additions of Type-A DNS records (with translation according to the whitelist)
+
+			recordsToAddVarLock.Lock()
+			for _, addRec := range recordsToAdd {
+				// should we check duplicates?
+				//  if there exists a duplicate , do not add it this time.
+				//  consider a scenario: the main goroutine wait at the lock located
+				//  in AddRecord(). When the lock here is released, duplicate add
+				//  requests are made.
+				foundInWhiteList, addJrec := transUrecToAJrec(addRec)
+				if !foundInWhiteList {
+					panic(fmt.Sprint("add record:", addRec, " should have been in whitelist"))
+				}
+
+				foundDuplicate := false
+				for _, hostListRec := range hostlist {
+					if hostListRec.domain == addJrec.domain && hostListRec.host == addJrec.host {
+						foundDuplicate = true
+						break
+					}
+				}
+
+				if foundDuplicate {
+					continue
+				} else {
+					hostlist = append(hostlist, addJrec)
+				}
+
+			}
+			recordsToAddVarLock.Unlock()
+
+			// STEP 4. post the whole conf to pfSense
+
+			var hostlistToSend []interface{}
+			for _, jrec := range hostlist {
+				hostlistToSend = append(hostlistToSend, map[string]interface{}{
+					"aliases": "",
+					"descr":   "a Rancher/external-dns autogenerated record",
+					"domain":  jrec.domain,
+					"host":    jrec.host,
+					"ip":      jrec.ip,
+				})
+			}
+
+			confDnsmasqHosts = hostlistToSend
+			confDnsmasq["hosts"] = confDnsmasqHosts
+			conf["dnsmasq"] = confDnsmasq
+
+			pf.postConfig(conf)
+
+			// STEP 5. update local TXT record & update its MySQL backup
+			// TODO: check locks; clear change records; clear change flag; set change flag
+
+			localTxtRecVarLock.Lock()
+			*pLocalTxtRec = txtRecToUpdate
+			localTxtRecVarLock.Unlock()
+
+			db, err := sql.Open("mysql", pf.dbOpenParam)
+			if err != nil {
+				fmt.Println("db open errs")
+				panic(err)
+			}
+			defer db.Close()
+
+			err = db.Ping()
+			if err != nil {
+				fmt.Println("db ping err")
+				panic(err)
+			}
+
+			localTxtRecVarLock.Lock()
+			var txtInJson = map[string]interface{}{
+				"Fqdn":    pLocalTxtRec.Fqdn,
+				"Records": pLocalTxtRec.Records,
+				"Type":    pLocalTxtRec.Type,
+				"TTL":     pLocalTxtRec.TTL,
+			}
+			localTxtRecVarLock.Unlock()
+			var txtJsonInBytes, _ = json.Marshal(txtInJson)
+
+			db.Exec("delete from TxtRec")
+			db.Exec("insert into TxtRec (Txt) value (?)", string(txtJsonInBytes))
+
+			// STEP 6. update the local version of the conf, TXT record
+			// TODO: Check locks!!!
+			localDnsARecordVarLock.Lock()
+			localDnsARecord = []utils.DnsRecord{}
+			for _, jrec := range hostlist {
+				foundInWhiteList, urec := transAJrecToUrec(jrec)
+				if foundInWhiteList {
+					localDnsARecord = append(localDnsARecord, urec)
+				} else {
+					// just leave it
+				}
+			}
+			localDnsARecordVarLock.Unlock()
+
+			// STEP 7. apply the changes made to dnsmasq, which would
+			//          break down the DNS for a short interval
+
+			pf.applyChanges()
+
+			// STEP 8. wait for dnsmasq to restart
+			time.Sleep(5 * time.Second)
 		}
 	}()
 }
 
+func transAJrecToUrec(Jrec jsonDnsmasqHostEntry) (bool, utils.DnsRecord) {
+	var foundInWhiteList = false
+	var Drec utils.DnsRecord
+	for _, whiteEnt := range whiteList {
+		if whiteEnt.host == Jrec.host && whiteEnt.domain == Jrec.domain {
+			foundInWhiteList = true
+			Drec.Fqdn = whiteEnt.Fqdn
+			Drec.Records = []string{Jrec.ip}
+			Drec.TTL = 150
+			Drec.Type = "A"
+			break
+		}
+	}
+	return foundInWhiteList, Drec
+}
+
+func transUrecToAJrec(Urec utils.DnsRecord) (bool, jsonDnsmasqHostEntry) {
+	var foundInWhiteList = false
+	var Jrec jsonDnsmasqHostEntry
+	for _, whiteEnt := range whiteList {
+		if whiteEnt.Fqdn == Urec.Fqdn {
+			foundInWhiteList = true
+			Jrec.descr = "a Rancher/external-dns autogenerated record"
+			Jrec.domain = whiteEnt.domain
+			Jrec.ip = Urec.Records[0]
+			break
+		}
+	}
+	return foundInWhiteList, Jrec
+}
+
+type jsonDnsmasqHostEntry struct {
+	aliases string
+	descr   string
+	domain  string
+	host    string
+	ip      string
+}
+
+var shouldApplyVarLock = sync.Mutex{}
+var shouldApply = false
+
+// GetName will be called by external-dns.go
 func (pf *PfsenseProvider) GetName() string {
 	fmt.Println("***** GetName() called and ends *****")
 	return "Pfsense"
 }
 
+// HealthCheck will be called in a goroutine created by main.go
+//  to perform satinization in the orginal setting.
+//  However, it is of no use here.
 func (pf *PfsenseProvider) HealthCheck() error {
 	return nil
 }
 
+// generate auth for pfSense FauxAPI
 func (pf *PfsenseProvider) generateAuth() string {
 	b := make([]byte, 40)
 	_, err := rand.Read(b)
@@ -169,7 +485,9 @@ func (pf *PfsenseProvider) generateAuth() string {
 	return authVal
 }
 
-func (pf *PfsenseProvider) getConfig() (map[string]interface{}, error) {
+// return the configuration file from pfSense (the config.xml)
+//  in JSON format
+func (pf *PfsenseProvider) getConfig() map[string]interface{} {
 
 	authVal := pf.generateAuth()
 	actionmutex.Lock()
@@ -198,11 +516,10 @@ func (pf *PfsenseProvider) getConfig() (map[string]interface{}, error) {
 
 	}
 	lst := configDat["data"].(map[string]interface{})["config"].(map[string]interface{})
-	return lst, nil
+	return lst
 }
 
-var localConf map[string]interface{}
-
+// post a new configuration file to pfSense
 func (pf *PfsenseProvider) postConfig(conf map[string]interface{}) error {
 	actionmutex.Lock()
 	client := &http.Client{}
@@ -236,246 +553,16 @@ func (pf *PfsenseProvider) postConfig(conf map[string]interface{}) error {
 	return nil
 }
 
-func (pf *PfsenseProvider) AddRecord(record utils.DnsRecord) error {
-
-	fmt.Println("***** AddRecord() called *****")
-	fmt.Println("utils.dnsRecord:", record)
-	// updateWhiteList()
-	if record.Type == "A" {
-		// Temporarily ignore non-A records, and only allow records appeared in whitelist to be registered in the pfsense
-		var toHost string
-		var toDomain string
-		var found = false
-		for _, rec := range WhiteList {
-			if rec.Fqdn == record.Fqdn {
-				found = true
-				toHost = rec.host
-				toDomain = rec.domain
-				fmt.Println("AddRecord: current record found")
-				fmt.Println("Dnsrecord:", record)
-				fmt.Println("Whitelist match:", rec)
-				break
-			}
-		}
-		if !found {
-			fmt.Println("AddRecord: current record not found in whitelist", record)
-			return nil
-		}
-
-		if err := pf.RemoveRecord(record); err != nil {
-			fmt.Println("AddRecord: RemoveRecord errs")
-			return err
-		}
-
-		conf, _ := pf.getConfig()
-
-		hostList := conf["dnsmasq"].(map[string]interface{})["hosts"].([]interface{})
-
-		hostList = append(hostList, map[string]interface{}{
-			"aliases": "",
-			"descr":   "a Rancher/external-dns autogenerated record",
-			"domain":  toDomain,
-			"host":    toHost,
-			// "idx":     "",
-			"ip": record.Records[0],
-		})
-
-		updateDnsmasq := conf["dnsmasq"].(map[string]interface{})
-		updateDnsmasq["hosts"] = hostList
-		conf["dnsmasq"] = updateDnsmasq
-
-		fmt.Println("Current hostList:", hostList)
-		pf.postConfig(conf)
-
-	} else if record.Type == "TXT" {
-
-		// we now store the TXT record in DB
-		actionmutex.Lock()
-		db, err := sql.Open("mysql", pf.dbOpenParam)
-		if err != nil {
-			fmt.Println("db open errs")
-			panic(err)
-		}
-		defer db.Close()
-
-		err = db.Ping()
-		if err != nil {
-			fmt.Println("db ping err")
-			panic(err)
-		}
-
-		var recordInJson = map[string]interface{}{
-			"Fqdn":    record.Fqdn,
-			"Records": record.Records,
-			"Type":    record.Type,
-			"TTL":     record.TTL,
-		}
-		var jsonInBytes, _ = json.Marshal(recordInJson)
-		db.Exec("delete from TxtRec")
-		db.Exec("insert into TxtRec (Txt) value (?)", string(jsonInBytes))
-		actionmutex.Unlock()
-	}
-	fmt.Println("*****AddRecord() ends *****")
-	return nil
-}
-
-func (pf *PfsenseProvider) UpdateRecord(record utils.DnsRecord) error {
-	fmt.Println("***** Update() called *****")
-	fmt.Println("utils.dnsRecord:", record)
-
-	if err := pf.RemoveRecord(record); err != nil {
-		fmt.Println("remove record fails")
-		panic(err)
-	}
-	fmt.Println("***** Update() ends *****")
-	return pf.AddRecord(record)
-}
-
-func (pf *PfsenseProvider) RemoveRecord(record utils.DnsRecord) error {
-	fmt.Println("***** RemoveRecord() called *****")
-	fmt.Println("utils.dnsRecord:", record)
-
-	if record.Type != "A" {
-		fmt.Println("RemoveRecord: non-A record found")
-		return nil
-	}
-
-	conf, _ := pf.getConfig()
-
-	var toHost string
-	var toDomain string
-	var found = false
-	for _, rec := range WhiteList {
-		if rec.Fqdn == record.Fqdn {
-			found = true
-			toHost = rec.host
-			toDomain = rec.domain
-		}
-	}
-	if !found {
-		fmt.Println("***** record to remove is not found. *****")
-		return nil
-	}
-
-	hostList := conf["dnsmasq"].(map[string]interface{})["hosts"].([]interface{})
-	var updatedList []interface{}
-	fmt.Println("hostlist before:", hostList)
-
-	fmt.Println("toHost:", toHost, "toDomain:", toDomain)
-	for _, confRecord := range hostList {
-		fmt.Println("conf[host]:", confRecord.(map[string]interface{})["host"].(string))
-		fmt.Println("conf[domain]:", confRecord.(map[string]interface{})["domain"].(string))
-		if confRecord.(map[string]interface{})["host"].(string) == toHost &&
-			confRecord.(map[string]interface{})["domain"].(string) == toDomain {
-			continue
-		} else {
-			updatedList = append(updatedList, confRecord)
-		}
-	}
-	updateDnsmasq := conf["dnsmasq"].(map[string]interface{})
-	updateDnsmasq["hosts"] = updatedList
-	conf["dnsmasq"] = updateDnsmasq
-
-	fmt.Println("hostlist after:", hostList)
-	pf.postConfig(conf)
-	// pf.applyChanges()
-	fmt.Println("*****RemoveRecord() ends******")
-
-	return nil
-}
-
-func (pf *PfsenseProvider) GetRecords() ([]utils.DnsRecord, error) {
-	fmt.Println("***** GetRecords() called *****")
-	var records []utils.DnsRecord
-	conf, _ := pf.getConfig()
-
-	hostList := conf["dnsmasq"].(map[string]interface{})["hosts"].([]interface{})
-	for idx, rec := range hostList {
-		fmt.Println(idx, ":", rec)
-
-		var fromFqdn string
-		var found = false
-		for _, whiteEnt := range WhiteList {
-			if whiteEnt.host == rec.(map[string]interface{})["host"].(string) &&
-				whiteEnt.domain == rec.(map[string]interface{})["domain"].(string) {
-				fromFqdn = whiteEnt.Fqdn
-				found = true
-				break
-			}
-		}
-
-		if !found {
-			continue
-		}
-
-		records = append(records, utils.DnsRecord{
-			Fqdn:    fromFqdn,
-			Records: []string{rec.(map[string]interface{})["ip"].(string)},
-			Type:    "A",
-			// Currently, we only process Type A record
-			TTL: 150,
-		})
-	}
-
-	// Now, fetch TXT record from MySQL
-	actionmutex.Lock()
-	db, err := sql.Open("mysql", pf.dbOpenParam)
-	if err != nil {
-		fmt.Println("db open errs")
-		panic(err)
-	}
-	defer db.Close()
-
-	err = db.Ping()
-	if err != nil {
-		fmt.Println("db ping err")
-		panic(err)
-	}
-
-	Txt, err := db.Query("select Txt from TxtRec limit 1")
-	if err != nil {
-		fmt.Println("db query errs:", err)
-		panic(err)
-	}
-	var TxtInString string
-
-	count := 0
-	for Txt.Next() {
-		Txt.Scan(&TxtInString)
-		count++
-	}
-	defer Txt.Close()
-	actionmutex.Unlock()
-
-	fmt.Println("count:", count)
-
-	if count == 0 {
-		// just do not emit the TXT record
-	} else {
-
-		var TxtJson map[string]interface{}
-		err = json.Unmarshal([]byte(TxtInString), &TxtJson)
-		if err != nil {
-			fmt.Println("unmarshal errs")
-			panic(err)
-		}
-
-		Ips := TxtJson["Records"].([]interface{})
-		var Records []string
-		for _, ip := range Ips {
-			Records = append(Records, ip.(string))
-		}
-
-		records = append(records, utils.DnsRecord{
-			Fqdn:    TxtJson["Fqdn"].(string),
-			Records: Records,
-			Type:    "TXT",
-			TTL:     140,
-		})
-	}
-
-	fmt.Println("***** GetRecords() ends *****")
-	return records, nil
+// apply changes to dnsmasq. However, it is not safe to do so
+//  since the first function call actually tries to kill and
+//  restart the dnsmasq service, which might lead to the
+//  following function calls to panic() when they fails to resolve
+//  the hostname `pfsense`
+func (pf *PfsenseProvider) applyChanges() {
+	pf.functionCall("services_dnsmasq_configure")
+	pf.functionCall("filter_configure")
+	pf.functionCall("system_resolvconf_generate")
+	pf.functionCall("system_dhcpleases_configure")
 }
 
 func (pf *PfsenseProvider) functionCall(f string) {
@@ -515,9 +602,110 @@ func (pf *PfsenseProvider) functionCall(f string) {
 	defer resp.Body.Close()
 }
 
-func (pf *PfsenseProvider) applyChanges() {
-	pf.functionCall("services_dnsmasq_configure")
-	pf.functionCall("filter_configure")
-	pf.functionCall("system_resolvconf_generate")
-	pf.functionCall("system_dhcpleases_configure")
+func (pf *PfsenseProvider) AddRecord(record utils.DnsRecord) error {
+
+	// TODO: filter according to whitelist
+	fmt.Println("***** AddRecord() called *****")
+	fmt.Println("utils.dnsRecord:", record)
+	if record.Type == "A" {
+		shouldApplyVarLock.Lock()
+		shouldApply = true
+		shouldApplyVarLock.Unlock()
+
+		recordsToAddVarLock.Lock()
+		// should remove duplicates?
+		var newRecordsToAdd = []utils.DnsRecord{record}
+		for _, rec := range recordsToAdd {
+			if rec.Fqdn == record.Fqdn {
+				continue
+			} else {
+				newRecordsToAdd = append(newRecordsToAdd, rec)
+			}
+		}
+		recordsToAdd = newRecordsToAdd
+		recordsToAddVarLock.Unlock()
+	} else if record.Type == "TXT" {
+		shouldApplyVarLock.Lock()
+		shouldApply = true
+		shouldApplyVarLock.Unlock()
+
+		txtRecToUpdateVarLock.Lock()
+		txtRecToUpdate = record
+		txtRecToUpdateVarLock.Unlock()
+	} else {
+		fmt.Println("AddRecord: neither-A-nor-TXT record found")
+	}
+	fmt.Println("*****AddRecord() ends *****")
+	return nil
+}
+
+var recordsToAdd []utils.DnsRecord
+var recordsToAddVarLock = sync.Mutex{}
+var txtRecToUpdate utils.DnsRecord
+var txtRecToUpdateVarLock = sync.Mutex{}
+
+func (pf *PfsenseProvider) UpdateRecord(record utils.DnsRecord) error {
+	fmt.Println("***** Update() called *****")
+	fmt.Println("utils.dnsRecord:", record)
+
+	pf.RemoveRecord(record)
+
+	pf.AddRecord(record)
+
+	fmt.Println("***** Update() ends *****")
+	return nil
+}
+
+func (pf *PfsenseProvider) RemoveRecord(record utils.DnsRecord) error {
+	fmt.Println("***** RemoveRecord() called *****")
+	// TODO: filter according to the whitelist
+	fmt.Println("utils.dnsRecord:", record)
+
+	if record.Type == "TXT" {
+		fmt.Println("RemoveRecord: TXT record found")
+		return nil
+	} else if record.Type != "A" {
+		fmt.Println("RemoveRecord: non-A record found")
+		return nil
+	}
+
+	shouldApplyVarLock.Lock()
+	shouldApply = true
+	shouldApplyVarLock.Unlock()
+
+	recordsToRemoveVarLock.Lock()
+	// remove duplicates
+	var newRecordsToRemove = []utils.DnsRecord{record}
+	for _, rec := range recordsToRemove {
+		if rec.Fqdn == record.Fqdn {
+			continue
+		} else {
+			newRecordsToRemove = append(newRecordsToRemove, rec)
+		}
+	}
+	recordsToRemove = newRecordsToRemove
+	recordsToRemoveVarLock.Unlock()
+
+	fmt.Println("*****RemoveRecord() ends******")
+
+	return nil
+}
+
+var recordsToRemove []utils.DnsRecord
+var recordsToRemoveVarLock = sync.Mutex{}
+
+func (pf *PfsenseProvider) GetRecords() ([]utils.DnsRecord, error) {
+	fmt.Println("***** GetRecords() called *****")
+
+	localDnsARecordVarLock.Lock()
+	var retRecords = make([]utils.DnsRecord, len(localDnsARecord), len(localDnsARecord)+1)
+	copy(retRecords, localDnsARecord)
+	localDnsARecordVarLock.Unlock()
+
+	localTxtRecVarLock.Lock()
+	retRecords = append(retRecords, *pLocalTxtRec)
+	localTxtRecVarLock.Unlock()
+
+	fmt.Println("***** GetRecords() ends *****")
+	return retRecords, nil
 }
