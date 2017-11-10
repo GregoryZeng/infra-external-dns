@@ -135,15 +135,6 @@ func (pf *PfsenseProvider) GetName() string {
 }
 
 func (pf *PfsenseProvider) HealthCheck() error {
-	// fmt.Println("***** HealthCheck() called ******")
-	// c, _, err := zk.Connect([]string{"zk"}, time.Second)
-	// defer c.Close()
-	// if err != nil {
-	// 	fmt.Println("dnsmasq failed!")
-	// 	panic(err)
-	// }
-	// fmt.Println("***** HealthCheck() ends ******")
-
 	return nil
 }
 
@@ -210,7 +201,7 @@ func (pf *PfsenseProvider) getConfig() (map[string]interface{}, error) {
 	return lst, nil
 }
 
-var localDnsRecs map[string]interface{}
+var localConf map[string]interface{}
 
 func (pf *PfsenseProvider) postConfig(conf map[string]interface{}) error {
 	actionmutex.Lock()
@@ -295,7 +286,6 @@ func (pf *PfsenseProvider) AddRecord(record utils.DnsRecord) error {
 
 		fmt.Println("Current hostList:", hostList)
 		pf.postConfig(conf)
-		// pf.applyChanges()
 
 	} else if record.Type == "TXT" {
 
