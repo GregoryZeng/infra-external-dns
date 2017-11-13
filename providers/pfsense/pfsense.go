@@ -21,9 +21,9 @@ import (
 	"github.com/samuel/go-zookeeper/zk"
 )
 
-var varmutex = &sync.Mutex{}
-var actionmutex = &sync.Mutex{}
-var changed = false
+// var varmutex = &sync.Mutex{}
+// var actionmutex = &sync.Mutex{}
+// var changed = false
 
 type PfsenseProvider struct {
 	apiKey      string
@@ -227,17 +227,16 @@ var localTxtRecVarLock = sync.Mutex{}
 //  which is responsible for updating local information
 func (pf *PfsenseProvider) batchUpdate() {
 	go func() {
+
+		// check if changes have been made from the main goroutine,
+		//  thus avoiding unnecessary connections
+
 		shouldApplyVarLock.Lock()
-
-		// TODO: check if changes have been made from the main goroutine,
-		//       thus avoiding unnecessary connections
-
 		if shouldApply {
 			shouldApply = false
 			shouldApplyVarLock.Unlock()
 
-			// perform getConfig, deltaChange (including additions
-			//  and deletions), postConfig, applyConfig, updateMySQL.
+			// perform all sorts of updates that involves connections,
 			//  then sleep 5 secs waiting for the dnsmasq to restart
 
 			// STEP 1. GET the latest config.xml from pfSense in JSON format
@@ -294,10 +293,10 @@ func (pf *PfsenseProvider) batchUpdate() {
 
 			recordsToAddVarLock.Lock()
 			for _, addRec := range recordsToAdd {
-				// should we check duplicates?
+				// should we check duplicates here?
 				//  if there exists a duplicate , do not add it this time.
 				//  consider a scenario: the main goroutine wait at the lock located
-				//  in AddRecord(). When the lock here is released, duplicate add
+				//  in AddRecord(). When the lock here is released, duplicate addRecord
 				//  requests are made.
 				foundInWhiteList, addJrec := transUrecToAJrec(addRec)
 				if !foundInWhiteList {
@@ -370,6 +369,7 @@ func (pf *PfsenseProvider) batchUpdate() {
 			localTxtRecVarLock.Unlock()
 			var txtJsonInBytes, _ = json.Marshal(txtInJson)
 
+			// TODO: replace 2 SQL commands with only 1
 			db.Exec("delete from TxtRec")
 			db.Exec("insert into TxtRec (Txt) value (?)", string(txtJsonInBytes))
 
@@ -386,6 +386,12 @@ func (pf *PfsenseProvider) batchUpdate() {
 				}
 			}
 			localDnsARecordVarLock.Unlock()
+
+			localTxtRecVarLock.Lock()
+			txtRecToUpdateVarLock.Lock()
+			*pLocalTxtRec = txtRecToUpdate
+			txtRecToUpdateVarLock.Unlock()
+			localTxtRecVarLock.Unlock()
 
 			// STEP 7. apply the changes made to dnsmasq, which would
 			//          break down the DNS for a short interval
@@ -490,7 +496,7 @@ func (pf *PfsenseProvider) generateAuth() string {
 func (pf *PfsenseProvider) getConfig() map[string]interface{} {
 
 	authVal := pf.generateAuth()
-	actionmutex.Lock()
+	// actionmutex.Lock()
 	client := &http.Client{}
 	req, err := http.NewRequest("GET", "http://pfsense/fauxapi/v1/?action=config_get&__debug=True", nil)
 	req.Header.Add("fauxapi-auth", authVal)
@@ -507,7 +513,7 @@ func (pf *PfsenseProvider) getConfig() map[string]interface{} {
 		panic("resp errs")
 
 	}
-	actionmutex.Unlock()
+	// actionmutex.Unlock()
 	var configDat map[string]interface{}
 
 	if err = json.Unmarshal(config, &configDat); err != nil {
@@ -519,9 +525,9 @@ func (pf *PfsenseProvider) getConfig() map[string]interface{} {
 	return lst
 }
 
-// post a new configuration file to pfSense
+// post a new configuration file (in whole) to pfSense
 func (pf *PfsenseProvider) postConfig(conf map[string]interface{}) error {
-	actionmutex.Lock()
+	// actionmutex.Lock()
 	client := &http.Client{}
 	configBytes, err := json.Marshal(conf)
 	if err != nil {
@@ -545,10 +551,10 @@ func (pf *PfsenseProvider) postConfig(conf map[string]interface{}) error {
 		fmt.Println("client GET fails")
 		panic(err)
 	}
-	actionmutex.Unlock()
-	varmutex.Lock()
-	changed = true
-	varmutex.Unlock()
+	// actionmutex.Unlock()
+	// varmutex.Lock()
+	// changed = true
+	// varmutex.Unlock()
 	defer resp.Body.Close()
 	return nil
 }
@@ -602,18 +608,34 @@ func (pf *PfsenseProvider) functionCall(f string) {
 	defer resp.Body.Close()
 }
 
+func urecInWhitelist(record utils.DnsRecord) (bool, *whitelistEntry) {
+	for _, wrec := range whiteList {
+		if wrec.Fqdn == record.Fqdn {
+			return true, &wrec
+		}
+	}
+	return false, nil
+}
+
 func (pf *PfsenseProvider) AddRecord(record utils.DnsRecord) error {
 
-	// TODO: filter according to whitelist
 	fmt.Println("***** AddRecord() called *****")
 	fmt.Println("utils.dnsRecord:", record)
 	if record.Type == "A" {
+
+		// whether in whitelist
+		found, _ := urecInWhitelist(record)
+		if !found {
+			fmt.Println("AddRecord:", record, " not found in whitelist")
+			return nil
+		}
+
 		shouldApplyVarLock.Lock()
 		shouldApply = true
 		shouldApplyVarLock.Unlock()
 
+		// remove duplicates in queue
 		recordsToAddVarLock.Lock()
-		// should remove duplicates?
 		var newRecordsToAdd = []utils.DnsRecord{record}
 		for _, rec := range recordsToAdd {
 			if rec.Fqdn == record.Fqdn {
@@ -624,6 +646,7 @@ func (pf *PfsenseProvider) AddRecord(record utils.DnsRecord) error {
 		}
 		recordsToAdd = newRecordsToAdd
 		recordsToAddVarLock.Unlock()
+
 	} else if record.Type == "TXT" {
 		shouldApplyVarLock.Lock()
 		shouldApply = true
@@ -658,7 +681,7 @@ func (pf *PfsenseProvider) UpdateRecord(record utils.DnsRecord) error {
 
 func (pf *PfsenseProvider) RemoveRecord(record utils.DnsRecord) error {
 	fmt.Println("***** RemoveRecord() called *****")
-	// TODO: filter according to the whitelist
+
 	fmt.Println("utils.dnsRecord:", record)
 
 	if record.Type == "TXT" {
@@ -669,12 +692,19 @@ func (pf *PfsenseProvider) RemoveRecord(record utils.DnsRecord) error {
 		return nil
 	}
 
+	// whether in whitelist
+	found, _ := urecInWhitelist(record)
+	if !found {
+		fmt.Println("RemoveRecord:", record, "not found in whitelist")
+		return nil
+	}
+
 	shouldApplyVarLock.Lock()
 	shouldApply = true
 	shouldApplyVarLock.Unlock()
 
-	recordsToRemoveVarLock.Lock()
 	// remove duplicates
+	recordsToRemoveVarLock.Lock()
 	var newRecordsToRemove = []utils.DnsRecord{record}
 	for _, rec := range recordsToRemove {
 		if rec.Fqdn == record.Fqdn {
@@ -697,11 +727,16 @@ var recordsToRemoveVarLock = sync.Mutex{}
 func (pf *PfsenseProvider) GetRecords() ([]utils.DnsRecord, error) {
 	fmt.Println("***** GetRecords() called *****")
 
+	// Add Type A records
 	localDnsARecordVarLock.Lock()
 	var retRecords = make([]utils.DnsRecord, len(localDnsARecord), len(localDnsARecord)+1)
-	copy(retRecords, localDnsARecord)
+	count := copy(retRecords, localDnsARecord)
+	if count != len(localDnsARecord) {
+		panic(fmt.Sprint("GetRecords: copy", count, "elements!"))
+	}
 	localDnsARecordVarLock.Unlock()
 
+	// Add Type TXT record
 	localTxtRecVarLock.Lock()
 	retRecords = append(retRecords, *pLocalTxtRec)
 	localTxtRecVarLock.Unlock()
