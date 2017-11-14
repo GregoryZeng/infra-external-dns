@@ -273,12 +273,43 @@ func (pf *PfsenseProvider) batchUpdate() {
 
 				fmt.Println("afer step1 jhostlist:", jhostlist)
 
-				// STEP 2. perform deletions of DNS records (with translation according to the whitelist)
+				// STEP 2. perform additions of Type-A DNS records (with translation according to the whitelist)
+
+				recordsToAddVarLock.Lock()
+				fmt.Println("step2 addlst:", recordsToAdd)
+				fmt.Println("recordstoadd:", recordsToAdd)
+				for _, addURec := range recordsToAdd {
+
+					foundInWhiteList, addJrec := transUrecToAJrec(addURec)
+					if !foundInWhiteList {
+						panic(fmt.Sprint("add record:", addURec, " not in whitelist"))
+					}
+
+					// check duplicates
+					foundDuplicate := false
+					for _, jhostListRec := range jhostlist {
+						if jhostListRec.domain == addJrec.domain && jhostListRec.host == addJrec.host {
+							foundDuplicate = true
+							break
+						}
+					}
+
+					if foundDuplicate {
+						continue
+					} else {
+						jhostlist = append(jhostlist, addJrec)
+					}
+
+				}
+				recordsToAdd = []utils.DnsRecord{}
+				recordsToAddVarLock.Unlock()
+
+				// STEP 3. perform deletions of DNS records (with translation according to the whitelist)
 				// 		    then clear local remove queue
 				var newjHostlist []jsonDnsmasqHostEntry
 
 				recordsToRemoveVarLock.Lock()
-				fmt.Println("step2 remList:", recordsToRemove)
+				fmt.Println("step3 remList:", recordsToRemove)
 				for _, jRec := range jhostlist {
 
 					// perform possible deletion
@@ -312,41 +343,6 @@ func (pf *PfsenseProvider) batchUpdate() {
 				newjHostlist = []jsonDnsmasqHostEntry{}
 
 				fmt.Println("after step2 jhostlist:", jhostlist)
-
-				// STEP 3. perform additions of Type-A DNS records (with translation according to the whitelist)
-
-				recordsToAddVarLock.Lock()
-				fmt.Println("step3 addlst:", recordsToAdd)
-				fmt.Println("recordstoadd:", recordsToAdd)
-				for _, addURec := range recordsToAdd {
-
-					foundInWhiteList, addJrec := transUrecToAJrec(addURec)
-					if !foundInWhiteList {
-						panic(fmt.Sprint("add record:", addURec, " not in whitelist"))
-					}
-
-					// should we check duplicates here?
-					//  if there exists a duplicate , do not add it this time.
-					//  consider a scenario: the main goroutine wait at the lock located
-					//  in AddRecord(). When the lock here is released, duplicate addRecord
-					//  requests are made.
-					foundDuplicate := false
-					for _, jhostListRec := range jhostlist {
-						if jhostListRec.domain == addJrec.domain && jhostListRec.host == addJrec.host {
-							foundDuplicate = true
-							break
-						}
-					}
-
-					if foundDuplicate {
-						continue
-					} else {
-						jhostlist = append(jhostlist, addJrec)
-					}
-
-				}
-				recordsToAdd = []utils.DnsRecord{}
-				recordsToAddVarLock.Unlock()
 
 				fmt.Println("after step3 jhostlist", jhostlist)
 
