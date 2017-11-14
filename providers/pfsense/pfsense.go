@@ -372,19 +372,50 @@ func (pf *PfsenseProvider) batchUpdate() {
 				// update local
 				var localTxtToUpdateCopy *utils.DnsRecord
 
-				localTxtRecVarLock.Lock()
+				// copy txtRecToUpdate to localTxtToUpdateCopy
 				txtRecToUpdateVarLock.Lock()
 				if txtRecToUpdate != nil {
-					// if exists updates to the TXT rec
 					localTxtToUpdateCopy = new(utils.DnsRecord)
 					*localTxtToUpdateCopy = *txtRecToUpdate
-					if pLocalTxtRec == nil {
-						pLocalTxtRec = new(utils.DnsRecord)
-					}
-					*pLocalTxtRec = *txtRecToUpdate
 					txtRecToUpdate = nil
 				}
 				txtRecToUpdateVarLock.Unlock()
+
+				// TODO: modify localTxtToUpdateCopy to remove redundant entries
+				if localTxtToUpdateCopy != nil {
+					var newTxtHostList []string
+					for _, fqdn := range localTxtToUpdateCopy.Records {
+						found := false
+						// search in the jhostlist
+						for _, jrec := range jhostlist {
+							f, urec := transAJrecToUrec(jrec)
+							if !f {
+								fmt.Println(jrec, "ignored")
+								continue
+							}
+							if urec.Fqdn == fqdn {
+								found = true
+								break
+							}
+						}
+						if found {
+							newTxtHostList = append(newTxtHostList, fqdn)
+						} else {
+							// leave it
+						}
+					}
+					localTxtToUpdateCopy.Records = newTxtHostList
+				}
+
+				// copy localTxtToUpdateCopy to pLocalTxtRec
+				localTxtRecVarLock.Lock()
+				if localTxtToUpdateCopy != nil {
+					// if exists updates to the TXT rec
+					if pLocalTxtRec == nil {
+						pLocalTxtRec = new(utils.DnsRecord)
+					}
+					*pLocalTxtRec = *localTxtToUpdateCopy
+				}
 				localTxtRecVarLock.Unlock()
 
 				// update mysql
