@@ -203,7 +203,7 @@ func (pf *PfsenseProvider) getTxtFromMySQL() (bool, string) {
 		panic(err)
 	}
 
-	Txt, err := db.Query("select Txt from TxtRec limit 1")
+	Txt, err := db.Query("select Txt from TxtRec")
 	if err != nil {
 		fmt.Println("db query errs:", err)
 		panic(err)
@@ -418,8 +418,9 @@ func (pf *PfsenseProvider) batchUpdate() {
 					var txtJsonInBytes, _ = json.Marshal(txtInJson)
 
 					// TODO: replace 2 SQL commands with only 1
-					db.Exec("delete from TxtRec")
-					db.Exec("insert into TxtRec (Txt) value (?)", string(txtJsonInBytes))
+					// ("delete from TxtRec")db.Exec
+					// db.Exec("insert into TxtRec (Txt) value (?)", string(txtJsonInBytes))
+					db.Exec("insert into TxtRec (Dummy,Txt) values (1,(?)) on duplicate key update Dummy = 1, Txt = (?)", string(txtJsonInBytes), string(txtJsonInBytes))
 
 				}
 
