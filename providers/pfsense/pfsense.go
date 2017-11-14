@@ -801,10 +801,12 @@ func (pf *PfsenseProvider) GetRecords() ([]utils.DnsRecord, error) {
 	localTxtRecVarLock.Lock()
 	if pLocalTxtRec == nil {
 		// just leave it
+
 	} else {
 		retRecords = append(retRecords, *pLocalTxtRec)
+		fmt.Println("getrecord(): txtrecord", *pLocalTxtRec)
 	}
-	fmt.Println("getrecord(): txtrecord", *pLocalTxtRec)
+
 	localTxtRecVarLock.Unlock()
 
 	fmt.Println("***** GetRecords() ends *****")
