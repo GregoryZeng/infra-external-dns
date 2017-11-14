@@ -40,9 +40,9 @@ func (pf *PfsenseProvider) Init(rootDomainName string) error {
 	fmt.Println("***** Init() called *****")
 	fmt.Printf("rootDomainNames: %s \n", rootDomainName)
 
-	pf.apiSecret = pf.readStrFromZK("/external-dns-configuration/PFSENSE_APISECRET")
-	pf.apiKey = pf.readStrFromZK("/external-dns-configuration/PFSENSE_APIKEY")
-	pf.dbOpenParam = pf.readStrFromZK("/external-dns-configuration/MYSQL_OPENPARAM")
+	pf.apiSecret = pf.readStrFromZK("/pfsense-external-dns/bj/configuration/PFSENSE_APISECRET")
+	pf.apiKey = pf.readStrFromZK("/pfsense-external-dns/bj/configuration/PFSENSE_APIKEY")
+	pf.dbOpenParam = pf.readStrFromZK("/pfsense-external-dns/bj/configuration/MYSQL_OPENPARAM")
 
 	pf.getWhiteList()
 	pf.initLocalARecord()
@@ -92,14 +92,14 @@ func (pf *PfsenseProvider) getWhiteList() {
 		fmt.Println("zk connect fails")
 		panic(err)
 	}
-	children, _, _, err := c.ChildrenW("/external-dns-whitelist")
+	children, _, _, err := c.ChildrenW("/pfsense-external-dns/bj/whitelist")
 	if err != nil {
 		fmt.Println("children fetch fails")
 		panic(err)
 	}
 	whiteList = []whitelistEntry{}
 	for _, key := range children {
-		recv, _, _ := c.Get("/external-dns-whitelist/" + key)
+		recv, _, _ := c.Get("/pfsense-external-dns/bj/whitelist/" + key)
 		full := string(recv)
 		ind := strings.IndexRune(full, '.')
 		whiteList = append(whiteList, whitelistEntry{
