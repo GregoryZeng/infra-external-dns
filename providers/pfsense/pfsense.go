@@ -648,9 +648,9 @@ func (pf *PfsenseProvider) postConfig(conf map[string]interface{}) error {
 //  the hostname `pfsense`
 func (pf *PfsenseProvider) applyChanges() {
 	pf.functionCall("services_dnsmasq_configure")
-	pf.functionCall("filter_configure")
-	pf.functionCall("system_resolvconf_generate")
-	pf.functionCall("system_dhcpleases_configure")
+	// pf.functionCall("filter_configure")
+	// pf.functionCall("system_resolvconf_generate")
+	// pf.functionCall("system_dhcpleases_configure")
 }
 
 func (pf *PfsenseProvider) functionCall(f string) {
