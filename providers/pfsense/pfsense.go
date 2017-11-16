@@ -40,7 +40,8 @@ func (pf *PfsenseProvider) Init(rootDomainName string) error {
 	fmt.Println("***** Init() called *****")
 	fmt.Printf("rootDomainNames: %s \n", rootDomainName)
 
-	db, err := sql.Open("mysql", pf.dbOpenParam)
+	var err error
+	db, err = sql.Open("mysql", pf.dbOpenParam)
 	if err != nil {
 		fmt.Println("db open errs")
 		panic(err)
@@ -203,7 +204,7 @@ func (pf *PfsenseProvider) getTxtFromMySQL() (bool, string) {
 	// }
 	// defer db.Close()
 
-	err = db.Ping()
+	err := db.Ping()
 	if err != nil {
 		fmt.Println("db ping err")
 		panic(err)
