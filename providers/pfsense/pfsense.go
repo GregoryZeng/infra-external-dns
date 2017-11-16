@@ -40,16 +40,16 @@ func (pf *PfsenseProvider) Init(rootDomainName string) error {
 	fmt.Println("***** Init() called *****")
 	fmt.Printf("rootDomainNames: %s \n", rootDomainName)
 
+	pf.apiSecret = pf.readStrFromZK("/pfsense-external-dns/bj/configuration/PFSENSE_APISECRET")
+	pf.apiKey = pf.readStrFromZK("/pfsense-external-dns/bj/configuration/PFSENSE_APIKEY")
+	pf.dbOpenParam = pf.readStrFromZK("/pfsense-external-dns/bj/configuration/MYSQL_OPENPARAM")
+
 	var err error
 	db, err = sql.Open("mysql", pf.dbOpenParam)
 	if err != nil {
 		fmt.Println("db open errs")
 		panic(err)
 	}
-
-	pf.apiSecret = pf.readStrFromZK("/pfsense-external-dns/bj/configuration/PFSENSE_APISECRET")
-	pf.apiKey = pf.readStrFromZK("/pfsense-external-dns/bj/configuration/PFSENSE_APIKEY")
-	pf.dbOpenParam = pf.readStrFromZK("/pfsense-external-dns/bj/configuration/MYSQL_OPENPARAM")
 
 	pf.getWhiteList()
 	pf.initLocalARecord()
