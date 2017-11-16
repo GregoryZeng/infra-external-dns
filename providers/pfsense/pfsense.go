@@ -40,9 +40,20 @@ func (pf *PfsenseProvider) Init(rootDomainName string) error {
 	fmt.Println("***** Init() called *****")
 	fmt.Printf("rootDomainNames: %s \n", rootDomainName)
 
-	pf.apiSecret = pf.readStrFromZK("/pfsense-external-dns/bj/configuration/PFSENSE_APISECRET")
-	pf.apiKey = pf.readStrFromZK("/pfsense-external-dns/bj/configuration/PFSENSE_APIKEY")
-	pf.dbOpenParam = pf.readStrFromZK("/pfsense-external-dns/bj/configuration/MYSQL_OPENPARAM")
+	for pf.ifDnsmasqFails() {
+		// if dnsmasq fails, the program would panic and restart
+		// then these few lines of code will work
+		// ugly workaround but got no better choices now
+		pf.apiSecret = pf.readStrFromZK("10.130.9.15", "/pfsense-external-dns/bj/configuration/PFSENSE_APISECRET")
+		pf.apiKey = pf.readStrFromZK("10.130.9.15", "/pfsense-external-dns/bj/configuration/PFSENSE_APIKEY")
+		pf.applyChanges()
+		fmt.Println("Init ifDnsmasqFails: now try to restart dnsmasq...")
+		time.Sleep(5 * time.Second)
+	}
+
+	pf.apiSecret = pf.readStrFromZK("zk", "/pfsense-external-dns/bj/configuration/PFSENSE_APISECRET")
+	pf.apiKey = pf.readStrFromZK("zk", "/pfsense-external-dns/bj/configuration/PFSENSE_APIKEY")
+	pf.dbOpenParam = pf.readStrFromZK("zk", "/pfsense-external-dns/bj/configuration/MYSQL_OPENPARAM")
 
 	var err error
 	db, err = sql.Open("mysql", pf.dbOpenParam)
@@ -73,9 +84,9 @@ func forceRoutineBatchUpdate() {
 	}()
 }
 
-func (pf *PfsenseProvider) readStrFromZK(path string) string {
+func (pf *PfsenseProvider) readStrFromZK(zkpath string, path string) string {
 	fmt.Println("***** readStrFromZK() called *****")
-	c, _, err := zk.Connect([]string{"zk"}, 10*time.Second)
+	c, _, err := zk.Connect([]string{zkpath}, 10*time.Second)
 	defer c.Close()
 	if err != nil {
 		fmt.Println("zk connect fails")
@@ -549,6 +560,20 @@ func (pf *PfsenseProvider) HealthCheck() error {
 	return nil
 }
 
+// it is an easy way to check if DNS is healthy or not
+func (pf *PfsenseProvider) ifDnsmasqFails() bool {
+
+	client := &http.Client{}
+	req, err := http.NewRequest("GET", "http://pfsense/", nil)
+	resp, err := client.Do(req)
+	if err != nil {
+		fmt.Println("ifDnsmasqFails: cannot connect")
+		return true
+	}
+	defer resp.Body.Close()
+	return false
+}
+
 // generate auth for pfSense FauxAPI
 func (pf *PfsenseProvider) generateAuth() string {
 	b := make([]byte, 40)
@@ -678,7 +703,7 @@ func (pf *PfsenseProvider) functionCall(f string) {
 	}
 
 	req, err := http.NewRequest("POST",
-		"http://pfsense/fauxapi/v1/?action=function_call&__debug=True",
+		"http://10.130.1.1/fauxapi/v1/?action=function_call&__debug=True",
 		bytes.NewBuffer([]byte(configBytes)),
 	)
 	if err != nil {
