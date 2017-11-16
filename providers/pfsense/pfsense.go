@@ -40,6 +40,12 @@ func (pf *PfsenseProvider) Init(rootDomainName string) error {
 	fmt.Println("***** Init() called *****")
 	fmt.Printf("rootDomainNames: %s \n", rootDomainName)
 
+	db, err := sql.Open("mysql", pf.dbOpenParam)
+	if err != nil {
+		fmt.Println("db open errs")
+		panic(err)
+	}
+
 	pf.apiSecret = pf.readStrFromZK("/pfsense-external-dns/bj/configuration/PFSENSE_APISECRET")
 	pf.apiKey = pf.readStrFromZK("/pfsense-external-dns/bj/configuration/PFSENSE_APIKEY")
 	pf.dbOpenParam = pf.readStrFromZK("/pfsense-external-dns/bj/configuration/MYSQL_OPENPARAM")
@@ -190,12 +196,12 @@ func (pf *PfsenseProvider) initLocalTxt() {
 }
 
 func (pf *PfsenseProvider) getTxtFromMySQL() (bool, string) {
-	db, err := sql.Open("mysql", pf.dbOpenParam)
-	if err != nil {
-		fmt.Println("db open errs")
-		panic(err)
-	}
-	defer db.Close()
+	// db, err := sql.Open("mysql", pf.dbOpenParam)
+	// if err != nil {
+	// 	fmt.Println("db open errs")
+	// 	panic(err)
+	// }
+	// defer db.Close()
 
 	err = db.Ping()
 	if err != nil {
@@ -422,14 +428,13 @@ func (pf *PfsenseProvider) batchUpdate() {
 
 				if localTxtToUpdateCopy != nil {
 
-					db, err := sql.Open("mysql", pf.dbOpenParam)
-					if err != nil {
-						fmt.Println("db open errs")
-						panic(err)
-					}
-					defer db.Close()
+					// db, err := sql.Open("mysql", pf.dbOpenParam)
+					// if err != nil {
+					// 	fmt.Println("db open errs")
+					// 	panic(err)
+					// }
 
-					err = db.Ping()
+					err := db.Ping()
 					if err != nil {
 						fmt.Println("db ping err")
 						panic(err)
@@ -484,6 +489,8 @@ func (pf *PfsenseProvider) batchUpdate() {
 		}
 	}()
 }
+
+var db *sql.DB
 
 func transAJrecToUrec(Jrec jsonDnsmasqHostEntry) (bool, utils.DnsRecord) {
 	var foundInWhiteList = false
