@@ -67,7 +67,7 @@ func (pf *PfsenseProvider) Init(rootDomainName string) error {
 	pf.initLocalTxt()
 
 	pf.batchUpdate()
-	// forceRoutineBatchUpdate()
+	forceRoutineBatchUpdate()
 
 	fmt.Println("***** Init() ends ******")
 	return nil
@@ -264,7 +264,6 @@ func (pf *PfsenseProvider) batchUpdate() {
 			shouldApplyVarLock.Lock()
 			tmp := shouldApply
 			shouldApply = false
-			// fmt.Println("batchUpdate: I false the shouldApply")
 			shouldApplyVarLock.Unlock()
 			if tmp {
 				fmt.Println("***** batchUpdate called *****")
@@ -280,13 +279,25 @@ func (pf *PfsenseProvider) batchUpdate() {
 				for ind, dnsmasqEnt := range confDnsmasqHosts {
 					curEnt := dnsmasqEnt.(map[string]interface{})
 					fmt.Println("step1 iter ", ind, curEnt)
-					jhostlist = append(jhostlist, jsonDnsmasqHostEntry{
-						aliases: "",
-						descr:   curEnt["descr"].(string),
-						domain:  curEnt["domain"].(string),
-						host:    curEnt["host"].(string),
-						ip:      curEnt["ip"].(string),
-					})
+
+					possibleEmptyAlias, isEmptyAlias := curEnt["aliases"].(string)
+					if isEmptyAlias {
+						jhostlist = append(jhostlist, jsonDnsmasqHostEntry{
+							aliases: possibleEmptyAlias,
+							descr:   curEnt["descr"].(string),
+							domain:  curEnt["domain"].(string),
+							host:    curEnt["host"].(string),
+							ip:      curEnt["ip"].(string),
+						})
+					} else {
+						jhostlist = append(jhostlist, jsonDnsmasqHostEntry{
+							aliases: curEnt["aliases"].(map[string]interface{}),
+							descr:   curEnt["descr"].(string),
+							domain:  curEnt["domain"].(string),
+							host:    curEnt["host"].(string),
+							ip:      curEnt["ip"].(string),
+						})
+					}
 				}
 
 				fmt.Println("afer step1 jhostlist:", jhostlist)
@@ -321,6 +332,8 @@ func (pf *PfsenseProvider) batchUpdate() {
 				}
 				recordsToAdd = []utils.DnsRecord{}
 				recordsToAddVarLock.Unlock()
+
+				fmt.Println("after step2 jhostlist:", jhostlist)
 
 				// STEP 3. perform deletions of DNS records (with translation according to the whitelist)
 				// 		    then clear local remove queue
@@ -360,8 +373,6 @@ func (pf *PfsenseProvider) batchUpdate() {
 				jhostlist = newjHostlist
 				newjHostlist = []jsonDnsmasqHostEntry{}
 
-				fmt.Println("after step2 jhostlist:", jhostlist)
-
 				fmt.Println("after step3 jhostlist", jhostlist)
 
 				// STEP 4. post the whole conf to pfSense
@@ -369,7 +380,7 @@ func (pf *PfsenseProvider) batchUpdate() {
 				var jhostlistToSend []interface{}
 				for _, jrec := range jhostlist {
 					jhostlistToSend = append(jhostlistToSend, map[string]interface{}{
-						"aliases": "",
+						"aliases": jrec.aliases,
 						"descr":   jrec.descr,
 						"domain":  jrec.domain,
 						"host":    jrec.host,
@@ -439,12 +450,6 @@ func (pf *PfsenseProvider) batchUpdate() {
 				// update mysql
 
 				if localTxtToUpdateCopy != nil {
-
-					// db, err := sql.Open("mysql", pf.dbOpenParam)
-					// if err != nil {
-					// 	fmt.Println("db open errs")
-					// 	panic(err)
-					// }
 
 					err := db.Ping()
 					if err != nil {
@@ -530,14 +535,33 @@ func transUrecToAJrec(Urec utils.DnsRecord) (bool, jsonDnsmasqHostEntry) {
 			Jrec.domain = whiteEnt.domain
 			Jrec.ip = Urec.Records[0]
 			Jrec.host = whiteEnt.host
+
+			aliasHost, aliasDomain := fqdnToHostDomain(whiteEnt.Fqdn)
+
+			Jrec.aliases = map[string]interface{}{
+				"item": []interface{}{
+					map[string]interface{}{
+						"description": "<service>.<stack>.<environment>.<domain>",
+						"domain":      aliasDomain,
+						"host":        aliasHost,
+					},
+				},
+			}
 			break
 		}
 	}
 	return foundInWhiteList, Jrec
 }
 
+func fqdnToHostDomain(fqdn string) (string, string) {
+	unfqdn := utils.UnFqdn(fqdn)
+	ind1 := strings.IndexRune(unfqdn, '.')
+
+	return unfqdn[:ind1], unfqdn[ind1+1:]
+}
+
 type jsonDnsmasqHostEntry struct {
-	aliases string
+	aliases interface{} // could be string or map[string]interface{}
 	descr   string
 	domain  string
 	host    string
