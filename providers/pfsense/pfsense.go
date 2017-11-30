@@ -704,7 +704,8 @@ func (pf *PfsenseProvider) postConfig(conf map[string]interface{}) error {
 //  following function calls to panic() when they fails to resolve
 //  the hostname `pfsense`
 func (pf *PfsenseProvider) applyChanges() {
-	pf.functionCall("services_dnsmasq_configure")
+	pf.sendEvent("interface all reload")
+	//pf.functionCall("services_dnsmasq_configure")
 	// pf.functionCall("filter_configure")
 	// pf.functionCall("system_resolvconf_generate")
 	// pf.functionCall("system_dhcpleases_configure")
@@ -728,6 +729,41 @@ func (pf *PfsenseProvider) functionCall(f string) {
 
 	req, err := http.NewRequest("POST",
 		"http://10.130.1.1/fauxapi/v1/?action=function_call&__debug=True",
+		bytes.NewBuffer([]byte(configBytes)),
+	)
+	if err != nil {
+		fmt.Println("POST fails")
+		panic(err)
+	}
+
+	authVal := pf.generateAuth()
+	req.Header.Add("fauxapi-auth", authVal)
+	resp, err := client.Do(req)
+	if err != nil {
+		fmt.Println("client POST fails")
+		panic(err)
+	}
+	fmt.Println(resp.StatusCode)
+
+	defer resp.Body.Close()
+}
+
+func (pf *PfsenseProvider) sendEvent(event string) {
+
+	// mutex should not be put here
+
+	client := &http.Client{}
+
+	conf := []string{event}
+
+	configBytes, err := json.Marshal(conf)
+	if err != nil {
+		fmt.Println("json encoding fails")
+		panic(err)
+	}
+
+	req, err := http.NewRequest("POST",
+		"http://10.130.1.1/fauxapi/v1/?action=send_event&__debug=True",
 		bytes.NewBuffer([]byte(configBytes)),
 	)
 	if err != nil {
